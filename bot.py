@@ -13,6 +13,7 @@ from models import GameState, Orders, GameMap, Call, Plow, Position
 DEPOT_POSITION = [] #np.array([(10, 10), (10, 11), (10, 12), (10, 30), (10, 31), (10, 32), (11, 10), (11, 11), (11, 12), (11, 30), (11, 31), (11, 32), (12, 10), (12, 11), (12, 12), (12, 30), (12, 31), (12, 32)])
 GARAGE_POSITION = []
 first_turn = True
+MIN_SNOW_UNLOAD = 5
 
 def decide(state: GameState) -> Orders:
     if first_turn:
@@ -22,7 +23,7 @@ def decide(state: GameState) -> Orders:
         if plow.broken:
             go_to_garage(plow, state.map)
         else:
-            if next_to_depot(plow, state.map):
+            if next_to_depot(plow, state.map) and plow.load > MIN_SNOW_UNLOAD:
                 orders.unload(plow)
             else:
                 orders.move(plow, random.choice(get_possible_move(plow, state.map)))
@@ -59,15 +60,21 @@ def get_possible_move(plow: Plow, map: GameMap):
     return move
 
 def go_to_garage(plow: Plow, map: GameMap):
-    garage_position = Position(GARAGE_POSITION[0], GARAGE_POSITION[1])
+    garage_position = GARAGE_POSITION[0]
     next_move = astar_next_move(plow.position, garage_position, map)
     return next_move
 
 
-def astar_next_move(start: Position, target: Position, map: GameMap):
+def astar_next_move(start: Position, target, map: GameMap):
     """Return the next direction on an A* path to target."""
     start = Position(start.x % map.width, start.y % map.height)
-    target = Position(target.x % map.width, target.y % map.height)
+    if isinstance(target, Position):
+        target_x, target_y = target.x, target.y
+    else:
+        target_x, target_y = target
+    if isinstance(target_x, (tuple, list)):
+        target_x, target_y = target_x
+    target = Position(target_x % map.width, target_y % map.height)
     path = find_path(
         start,
         target,
