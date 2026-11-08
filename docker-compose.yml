@@ -9,13 +9,35 @@ services:
     ports:
       - "8080:8080"
     environment:
-      TEAMS: "moi"
+      TEAMS: "moi,equipe2,equipe3,equipe4"
       TICK_MS: "${TICK_MS:-400}"
       WAIT_FOR_ALL: "${WAIT_FOR_ALL:-0}"
       SEED: "${SEED:-}"
 
-  bot:
+  bot-moi:
     build: .
     environment:
       SERVER_URL: "http://server:8080/teams/moi"
+      BOT_STRATEGY: "calls"
+    depends_on: [server]
+
+  bot-equipe2:
+    build: .
+    environment:
+      SERVER_URL: "http://server:8080/teams/equipe2"
+      BOT_STRATEGY: "nearest"
+    depends_on: [server]
+
+  bot-equipe3:
+    build: .
+    environment:
+      SERVER_URL: "http://server:8080/teams/equipe3"
+      BOT_STRATEGY: "nearest"
+    depends_on: [server]
+
+  bot-equipe4:
+    build: .
+    environment:
+      SERVER_URL: "http://server:8080/teams/equipe4"
+      BOT_STRATEGY: "random"
     depends_on: [server]

@@ -5,6 +5,7 @@ Pour l'instant, chaque déneigeuse se déplace au hasard.
 """
 
 import random
+import os
 import time
 from itertools import permutations
 from astar import find_path
@@ -25,10 +26,16 @@ GAME_LENGTH = 1500
 MINIMUM_CASH_RESERVE = 10
 MIN_SMALL_PLOWS_FOR_BIG = 5
 CALL_MIN_PROFIT_MARGIN = 0
+CALL_REWARD_WEIGHT = 2
+DEPOT_NEARBY_DISTANCE = 6
 DECIDE_TIME_LIMIT_SECONDS = 0.35
 last_decide_time_ms = 0.0
+BOT_STRATEGY = os.environ.get("BOT_STRATEGY", "optimized")
 
 def decide(state: GameState) -> Orders:
+    if BOT_STRATEGY != "optimized":
+        return decide_alternative(state)
+
     global last_decide_time_ms
     start_time = time.perf_counter()
     deadline = start_time + DECIDE_TIME_LIMIT_SECONDS
@@ -118,6 +125,89 @@ def decide(state: GameState) -> Orders:
     return orders
 
 
+def decide_alternative(state: GameState) -> Orders:
+    """Run a deliberately different baseline strategy for local simulations."""
+    global last_decide_time_ms
+    start_time = time.perf_counter()
+    if first_turn:
+        first_turn_action(state.map)
+
+    orders = Orders()
+    reserved_positions = set()
+    purchase = should_buy_plow(
+        state,
+        elapsed_seconds=time.perf_counter() - start_time,
+    )
+    if purchase is not None:
+        orders.buy = purchase
+    for plow in state.my_plows:
+        if plow.broken:
+            next_move = go_to_garage(plow, state.map)
+        elif plow.load >= MIN_SNOW_UNLOAD and next_to_depot(plow, state.map):
+            SNOW_PLANS.pop(plow.id, None)
+            orders.unload(plow)
+            continue
+        elif plow.load >= MIN_SNOW_UNLOAD:
+            next_move = go_to_depot(
+                plow, state.map, state.plows, reserved_positions
+            )
+        else:
+            target = alternative_target(state, plow)
+            next_move = astar_next_move(
+                plow.position,
+                target,
+                state.map,
+                other_plow_positions(plow, state.plows)
+                + list(reserved_positions),
+            ) if target is not None else None
+
+        if next_move is not None:
+            destination = move_destination(plow.position, next_move, state.map)
+            if destination not in reserved_positions:
+                orders.move(plow, next_move)
+                reserve_next_positions(
+                    reserved_positions, plow.position, next_move, state.map
+                )
+
+    last_decide_time_ms = (time.perf_counter() - start_time) * 1000
+    return orders
+
+
+def alternative_target(state: GameState, plow: Plow):
+    """Choose a target for one of the local competitor strategies."""
+    blocked = other_plow_positions(plow, state.plows)
+    if BOT_STRATEGY == "calls":
+        call = valuable_call_target(
+            state,
+            plow,
+            set(blocked),
+            time.perf_counter() + DECIDE_TIME_LIMIT_SECONDS / 2,
+        )
+        if call is not None:
+            return call.position
+
+    snow_targets = [
+        Position(x, y)
+        for y in range(state.map.height)
+        for x in range(state.map.width)
+        if state.map.passable(x, y)
+        and state.map.snow[y][x] > 0
+        and Position(x, y) not in blocked
+    ]
+    if not snow_targets:
+        return None
+
+    if BOT_STRATEGY == "random":
+        return random.choice(snow_targets)
+    return min(
+        snow_targets,
+        key=lambda target: (
+            toroidal_distance(plow.position, target, state.map),
+            -state.map.snow[target.y][target.x],
+        ),
+    )
+
+
 def valuable_call_target(state, plow, reserved_positions, deadline):
     """Return the best reachable call worth prioritizing."""
     if time.perf_counter() >= deadline or not state.calls:
@@ -128,7 +218,6 @@ def valuable_call_target(state, plow, reserved_positions, deadline):
         for call in state.calls
         if call.expires_at > state.tick
         and call.position != plow.position
-        and call.position not in reserved_positions
         and state.map.snow[call.position.y][call.position.x] > 0
         and call.position not in {
             target.position
@@ -149,15 +238,21 @@ def valuable_call_target(state, plow, reserved_positions, deadline):
         if (
             enough_capacity
             and remaining_time > distance
-            and call.reward >= distance * 2 + CALL_MIN_PROFIT_MARGIN
+            and call.reward * CALL_REWARD_WEIGHT
+            >= distance * 2 + CALL_MIN_PROFIT_MARGIN
         ):
-            candidates.append((call.reward - distance * 2, call))
+            candidates.append((
+                call.reward * CALL_REWARD_WEIGHT - distance * 2,
+                call.reward,
+                -distance,
+                call,
+            ))
 
     if not candidates:
         CALL_TARGETS.pop(plow.id, None)
         return None
 
-    target = max(candidates, key=lambda item: item[0])[1]
+    target = max(candidates, key=lambda item: item[:3])[-1]
     CALL_TARGETS[plow.id] = target
     return target
 
@@ -361,6 +456,20 @@ def move_on_best_snow_loop(
     return next_move
 
 
+def depot_distance(position: Position, map: GameMap):
+    targets = depot_unload_targets(map)
+    if not targets:
+        return map.width + map.height
+    return min(
+        toroidal_distance(position, target, map)
+        for target in targets
+    )
+
+
+def near_depot(position: Position, map: GameMap):
+    return depot_distance(position, map) <= DEPOT_NEARBY_DISTANCE
+
+
 def best_snow_loop(state: GameState, plow: Plow, deadline=None):
     """Choose up to three snow stops with a reachable unloading tile."""
     remaining = SNOW_CAPACITY - plow.load
@@ -389,6 +498,11 @@ def best_snow_loop(state: GameState, plow: Plow, deadline=None):
     ]
     candidates.sort(
         key=lambda target: (
+            (
+                depot_distance(target, state.map)
+                if near_depot(plow.position, state.map)
+                else 0
+            ),
             -state.map.snow[target.y][target.x],
             toroidal_distance(plow.position, target, state.map),
         )
@@ -418,6 +532,7 @@ def best_snow_loop(state: GameState, plow: Plow, deadline=None):
             travel = 0
             valid = True
             effective_route = []
+            collected_positions = set()
             for target in route:
                 segment = path(current, target)
                 if segment is None:
@@ -426,10 +541,12 @@ def best_snow_loop(state: GameState, plow: Plow, deadline=None):
                 travel += len(segment) - 1
                 effective_route.append(target)
                 for position in segment[1:]:
-                    collected += min(
-                        state.map.snow[position.y][position.x],
-                        remaining - collected,
-                    )
+                    if position not in collected_positions:
+                        collected_positions.add(position)
+                        collected += min(
+                            state.map.snow[position.y][position.x],
+                            remaining - collected,
+                        )
                 current = target
                 if collected == remaining:
                     break
@@ -441,14 +558,18 @@ def best_snow_loop(state: GameState, plow: Plow, deadline=None):
                 segment = path(current, target)
                 if segment is not None:
                     extra_snow = sum(
-                        state.map.snow[position.y][position.x]
+                        min(
+                            state.map.snow[position.y][position.x],
+                            remaining - collected,
+                        )
                         for position in segment[1:]
+                        if position not in collected_positions
                     )
                     depot_options.append((len(segment) - 1, extra_snow))
             if not depot_options:
                 continue
 
-            depot_distance, depot_snow = max(
+            return_distance, depot_snow = max(
                 depot_options,
                 key=lambda option: (
                     min(option[1], remaining - collected),
@@ -456,7 +577,7 @@ def best_snow_loop(state: GameState, plow: Plow, deadline=None):
                 ),
             )
             collected += min(depot_snow, remaining - collected)
-            total_distance = travel + depot_distance
+            total_distance = travel + return_distance
             congestion = sum(
                 toroidal_distance(target, other.position, state.map) <= 2
                 for target in route
