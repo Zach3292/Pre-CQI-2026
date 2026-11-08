@@ -1,2 +1,3 @@
 # Ajoutez ici les bibliothèques dont votre bot a besoin (une par ligne).
 numpy
+astar==1.1
