@@ -372,6 +372,12 @@ def best_snow_loop(state: GameState, plow: Plow, deadline=None):
                  other.position.y % state.map.height)
         for other in blocking_plows(plow, state.plows)
     }
+    assigned_snow = {
+        target
+        for plow_id, plan in SNOW_PLANS.items()
+        if plow_id != plow.id
+        for target in plan
+    }
     candidates = [
         Position(x, y)
         for y in range(state.map.height)
@@ -379,6 +385,7 @@ def best_snow_loop(state: GameState, plow: Plow, deadline=None):
         if state.map.passable(x, y)
         and state.map.snow[y][x] > 0
         and Position(x, y) not in blocked
+        and Position(x, y) not in assigned_snow
     ]
     candidates.sort(
         key=lambda target: (
@@ -391,15 +398,15 @@ def best_snow_loop(state: GameState, plow: Plow, deadline=None):
         target for target in depot_unload_targets(state.map)
         if target not in blocked
     ]
-    distances = {}
+    paths = {}
 
-    def distance(start, target):
+    def path(start, target):
         key = (start, target)
-        if key not in distances:
-            distances[key] = shortest_path_length(
+        if key not in paths:
+            paths[key] = shortest_path(
                 start, target, state.map, blocked
             )
-        return distances[key]
+        return paths[key]
 
     best = None
     for stop_count in range(1, MAX_LOOP_STOPS + 1):
@@ -412,31 +419,44 @@ def best_snow_loop(state: GameState, plow: Plow, deadline=None):
             valid = True
             effective_route = []
             for target in route:
-                segment = distance(current, target)
+                segment = path(current, target)
                 if segment is None:
                     valid = False
                     break
-                travel += segment
+                travel += len(segment) - 1
                 effective_route.append(target)
-                collected += min(
-                    state.map.snow[target.y][target.x],
-                    remaining - collected,
-                )
+                for position in segment[1:]:
+                    collected += min(
+                        state.map.snow[position.y][position.x],
+                        remaining - collected,
+                    )
                 current = target
                 if collected == remaining:
                     break
             if not valid or collected == 0:
                 continue
 
-            to_depot = [
-                distance(current, target)
-                for target in unload_targets
-            ]
-            to_depot = [value for value in to_depot if value is not None]
-            if not to_depot:
+            depot_options = []
+            for target in unload_targets:
+                segment = path(current, target)
+                if segment is not None:
+                    extra_snow = sum(
+                        state.map.snow[position.y][position.x]
+                        for position in segment[1:]
+                    )
+                    depot_options.append((len(segment) - 1, extra_snow))
+            if not depot_options:
                 continue
 
-            total_distance = travel + min(to_depot)
+            depot_distance, depot_snow = max(
+                depot_options,
+                key=lambda option: (
+                    min(option[1], remaining - collected),
+                    -option[0],
+                ),
+            )
+            collected += min(depot_snow, remaining - collected)
+            total_distance = travel + depot_distance
             congestion = sum(
                 toroidal_distance(target, other.position, state.map) <= 2
                 for target in route
@@ -471,9 +491,14 @@ def depot_unload_targets(map: GameMap):
 
 
 def shortest_path_length(start, target, map: GameMap, blocked_positions=()):
+    path = shortest_path(start, target, map, blocked_positions)
+    return None if path is None else max(0, len(path) - 1)
+
+
+def shortest_path(start, target, map: GameMap, blocked_positions=()):
     start = Position(start.x % map.width, start.y % map.height)
     target = Position(target.x % map.width, target.y % map.height)
-    path = find_path(
+    result = find_path(
         start,
         target,
         neighbors_fnct=lambda position: astar_neighbors(
@@ -482,7 +507,7 @@ def shortest_path_length(start, target, map: GameMap, blocked_positions=()):
         heuristic_cost_estimate_fnct=lambda position, goal:
             toroidal_distance(position, goal, map),
     )
-    return None if path is None else max(0, len(list(path)) - 1)
+    return None if result is None else list(result)
 
 
 def other_plow_positions(plow: Plow, plows):
