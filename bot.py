@@ -5,12 +5,11 @@ Pour l'instant, chaque déneigeuse se déplace au hasard.
 """
 
 import random
-import numpy as np
 from astar import find_path
 
-from models import GameState, Orders, GameMap, Call, Plow, Position
+from models import GameState, Orders, GameMap, Plow, Position
 
-DEPOT_POSITION = [] #np.array([(10, 10), (10, 11), (10, 12), (10, 30), (10, 31), (10, 32), (11, 10), (11, 11), (11, 12), (11, 30), (11, 31), (11, 32), (12, 10), (12, 11), (12, 12), (12, 30), (12, 31), (12, 32)])
+DEPOT_POSITION = []
 GARAGE_POSITION = []
 DEPOT_TARGETS = {}
 first_turn = True
@@ -124,44 +123,31 @@ def get_constant(constants, *names, default):
     return default
 
 
-#===============HELPER FUNCTION=================
-
 def first_turn_action(map: GameMap):
-    global first_turn
-    # Get Depot and Garage position
     for i in range(map.width):
         for j in range(map.height):
             if map.tile(i, j) == "D":
                 DEPOT_POSITION.append((i, j))
             if map.tile(i, j) == "G":
                 GARAGE_POSITION.append((i, j))
+    global first_turn
     first_turn = False
-    # clean print the map
-    # print("Map:")
-    # for j in range(map.height):
-    #     row = ""
-    #     for i in range(map.width):
-    #         row += map.tile(i, j)
-    #     print(row)
 
 def next_to_depot(plow: Plow, map: GameMap):
-    result = False
-    if map.tile(plow.position.x, plow.position.y + 1) == "D": result = True
-    if map.tile(plow.position.x, plow.position.y - 1) == "D": result = True
-    if map.tile(plow.position.x + 1, plow.position.y) == "D": result = True
-    if map.tile(plow.position.x - 1, plow.position.y) == "D": result = True
-    return result
+    neighbors = (
+        (plow.position.x, plow.position.y + 1),
+        (plow.position.x, plow.position.y - 1),
+        (plow.position.x + 1, plow.position.y),
+        (plow.position.x - 1, plow.position.y),
+    )
+    return any(map.tile(x, y) == "D" for x, y in neighbors)
 
 def get_possible_move(plow: Plow, map: GameMap):
     return list(get_possible_move_from_position(plow.position, map))
 
 def go_to_garage(plow: Plow, map: GameMap, plows, reserved_positions=()):
     garage_position = GARAGE_POSITION[0]
-    other_plows = [
-        other.position
-        for other in plows
-        if other.id != plow.id and not other.broken
-    ]
+    other_plows = other_plow_positions(plow, plows)
     next_move = astar_next_move(
         plow.position,
         garage_position,
@@ -175,13 +161,9 @@ def go_to_depot(plow: Plow, map: GameMap, plows, reserved_positions=()):
     if not DEPOT_POSITION:
         return None
 
-    other_plows = [
-        other.position for other in plows
-        if other.id != plow.id and not other.broken
-    ]
     blocked_positions = {
         Position(position.x % map.width, position.y % map.height)
-        for position in other_plows
+        for position in other_plow_positions(plow, plows)
     }
     blocked_positions.update(reserved_positions)
     target = DEPOT_TARGETS.get(plow.id)
@@ -234,6 +216,14 @@ def go_to_depot(plow: Plow, map: GameMap, plows, reserved_positions=()):
             return next_move
 
     return None
+
+
+def other_plow_positions(plow: Plow, plows):
+    return [
+        other.position
+        for other in plows
+        if other.id != plow.id and not other.broken
+    ]
 
 
 def is_adjacent_to_depot(position: Position, depot, map: GameMap):
