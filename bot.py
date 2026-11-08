@@ -5,6 +5,7 @@ Pour l'instant, chaque déneigeuse se déplace au hasard.
 """
 
 import random
+from itertools import permutations
 from astar import find_path
 
 from models import GameState, Orders, GameMap, Plow, Position
@@ -12,8 +13,12 @@ from models import GameState, Orders, GameMap, Plow, Position
 DEPOT_POSITION = []
 GARAGE_POSITION = []
 DEPOT_TARGETS = {}
+SNOW_PLANS = {}
 first_turn = True
-MIN_SNOW_UNLOAD = 10
+MIN_SNOW_UNLOAD = 20
+SNOW_CAPACITY = 20
+MAX_LOOP_STOPS = 3
+MAX_SNOW_CANDIDATES = 7
 GAME_LENGTH = 1500
 MINIMUM_CASH_RESERVE = 10
 
@@ -50,15 +55,10 @@ def decide(state: GameState) -> Orders:
                             reserved_positions, plow.position, next_move, state.map
                         )
             else:
-                possible_moves = [
-                    direction
-                    for direction in get_possible_move(plow, state.map)
-                    if move_destination(
-                        plow.position, direction, state.map
-                    ) not in reserved_positions
-                ]
-                if possible_moves:
-                    next_move = random.choice(possible_moves)
+                next_move = move_on_best_snow_loop(state, plow)
+                if next_move is not None and move_destination(
+                    plow.position, next_move, state.map
+                ) not in reserved_positions:
                     orders.move(plow, next_move)
                     reserve_next_positions(
                         reserved_positions, plow.position, next_move, state.map
@@ -216,6 +216,162 @@ def go_to_depot(plow: Plow, map: GameMap, plows, reserved_positions=()):
             return next_move
 
     return None
+
+
+def move_on_best_snow_loop(state: GameState, plow: Plow):
+    """Follow a short route that maximizes snow collected before unloading."""
+    plan = [
+        target for target in SNOW_PLANS.get(plow.id, [])
+        if state.map.snow[target.y][target.x] > 0
+    ]
+    if plow.load >= SNOW_CAPACITY:
+        SNOW_PLANS.pop(plow.id, None)
+        return go_to_depot(plow, state.map, state.plows)
+    if not plan:
+        plan = best_snow_loop(state, plow)
+        if not plan:
+            return go_to_depot(plow, state.map, state.plows)
+
+    target = plan[0]
+    if plow.position == target:
+        SNOW_PLANS[plow.id] = plan
+        return None
+
+    next_move = astar_next_move(
+        plow.position,
+        target,
+        state.map,
+        other_plow_positions(plow, state.plows),
+    )
+    if next_move is None:
+        SNOW_PLANS.pop(plow.id, None)
+        return go_to_depot(plow, state.map, state.plows)
+    SNOW_PLANS[plow.id] = plan
+    return next_move
+
+
+def best_snow_loop(state: GameState, plow: Plow):
+    """Choose up to three snow stops with a reachable unloading tile."""
+    remaining = SNOW_CAPACITY - plow.load
+    if remaining <= 0 or not DEPOT_POSITION:
+        return []
+
+    blocked = {
+        Position(other.position.x % state.map.width,
+                 other.position.y % state.map.height)
+        for other in state.plows
+        if other.id != plow.id and not other.broken
+    }
+    candidates = [
+        Position(x, y)
+        for y in range(state.map.height)
+        for x in range(state.map.width)
+        if state.map.passable(x, y)
+        and state.map.snow[y][x] > 0
+        and Position(x, y) not in blocked
+    ]
+    candidates.sort(
+        key=lambda target: (
+            -state.map.snow[target.y][target.x],
+            toroidal_distance(plow.position, target, state.map),
+        )
+    )
+    candidates = candidates[:MAX_SNOW_CANDIDATES]
+    unload_targets = [
+        target for target in depot_unload_targets(state.map)
+        if target not in blocked
+    ]
+    distances = {}
+
+    def distance(start, target):
+        key = (start, target)
+        if key not in distances:
+            distances[key] = shortest_path_length(
+                start, target, state.map, blocked
+            )
+        return distances[key]
+
+    best = None
+    for stop_count in range(1, MAX_LOOP_STOPS + 1):
+        for route in permutations(candidates, stop_count):
+            current = plow.position
+            collected = 0
+            travel = 0
+            valid = True
+            effective_route = []
+            for target in route:
+                segment = distance(current, target)
+                if segment is None:
+                    valid = False
+                    break
+                travel += segment
+                effective_route.append(target)
+                collected += min(
+                    state.map.snow[target.y][target.x],
+                    remaining - collected,
+                )
+                current = target
+                if collected == remaining:
+                    break
+            if not valid or collected == 0:
+                continue
+
+            to_depot = [
+                distance(current, target)
+                for target in unload_targets
+            ]
+            to_depot = [value for value in to_depot if value is not None]
+            if not to_depot:
+                continue
+
+            total_distance = travel + min(to_depot)
+            congestion = sum(
+                toroidal_distance(target, other.position, state.map) <= 2
+                for target in route
+                for other in state.plows
+                if other.id != plow.id and not other.broken
+            )
+            score = (
+                collected * 100
+                + (100 if collected == remaining else 0)
+                - total_distance * 5
+                - congestion * 20
+            )
+            candidate = (score, collected, -total_distance, tuple(effective_route))
+            if best is None or candidate[:3] > best[:3]:
+                best = candidate
+
+    return list(best[3]) if best is not None else []
+
+
+def depot_unload_targets(map: GameMap):
+    targets = set()
+    for depot_x, depot_y in DEPOT_POSITION:
+        for target in (
+            Position(depot_x + 1, depot_y),
+            Position(depot_x - 1, depot_y),
+            Position(depot_x, depot_y + 1),
+            Position(depot_x, depot_y - 1),
+        ):
+            target = Position(target.x % map.width, target.y % map.height)
+            if map.passable(target.x, target.y):
+                targets.add(target)
+    return targets
+
+
+def shortest_path_length(start, target, map: GameMap, blocked_positions=()):
+    start = Position(start.x % map.width, start.y % map.height)
+    target = Position(target.x % map.width, target.y % map.height)
+    path = find_path(
+        start,
+        target,
+        neighbors_fnct=lambda position: astar_neighbors(
+            position, map, blocked_positions
+        ),
+        heuristic_cost_estimate_fnct=lambda position, goal:
+            toroidal_distance(position, goal, map),
+    )
+    return None if path is None else max(0, len(list(path)) - 1)
 
 
 def other_plow_positions(plow: Plow, plows):
