@@ -15,28 +15,113 @@ GARAGE_POSITION = []
 DEPOT_TARGETS = {}
 first_turn = True
 MIN_SNOW_UNLOAD = 10
+GAME_LENGTH = 1500
+MINIMUM_CASH_RESERVE = 10
 
 def decide(state: GameState) -> Orders:
     if first_turn:
         first_turn_action(state.map)
     orders = Orders()
+    reserved_positions = set()
+    purchase = should_buy_plow(state)
+    if purchase is not None:
+        orders.buy = purchase
     for plow in state.my_plows:
         if plow.broken:
-            next_move = go_to_garage(plow, state.map, state.plows)
+            next_move = go_to_garage(
+                plow, state.map, state.plows, reserved_positions
+            )
             if next_move is not None:
                 orders.move(plow, next_move)
+                reserve_next_positions(
+                    reserved_positions, plow.position, next_move, state.map
+                )
         else:
             if plow.load > MIN_SNOW_UNLOAD:
                 if next_to_depot(plow, state.map):
                     DEPOT_TARGETS.pop(plow.id, None)
                     orders.unload(plow)
                 else:
-                    next_move = go_to_depot(plow, state.map, state.plows)
+                    next_move = go_to_depot(
+                        plow, state.map, state.plows, reserved_positions
+                    )
                     if next_move is not None:
                         orders.move(plow, next_move)
+                        reserve_next_positions(
+                            reserved_positions, plow.position, next_move, state.map
+                        )
             else:
-                orders.move(plow, random.choice(get_possible_move(plow, state.map)))
+                possible_moves = [
+                    direction
+                    for direction in get_possible_move(plow, state.map)
+                    if move_destination(
+                        plow.position, direction, state.map
+                    ) not in reserved_positions
+                ]
+                if possible_moves:
+                    next_move = random.choice(possible_moves)
+                    orders.move(plow, next_move)
+                    reserve_next_positions(
+                        reserved_positions, plow.position, next_move, state.map
+                    )
     return orders
+
+
+def should_buy_plow(state: GameState):
+    """Return a profitable plow type to buy, or None.
+
+    Both plow types currently have the same speed and capacity. A normal
+    plow is therefore preferred because its purchase price is lower.
+    """
+    remaining_ticks = GAME_LENGTH - state.tick
+    if remaining_ticks <= 0 or state.money <= MINIMUM_CASH_RESERVE:
+        return None
+
+    if any(plow.position == state.garage for plow in state.plows):
+        return None
+
+    normal_price = get_constant(
+        state.constants,
+        "normal_price",
+        "price_normal",
+        "plow_price",
+        default=250,
+    )
+    big_price = get_constant(
+        state.constants,
+        "big_price",
+        "price_big",
+        "big_plow_price",
+        default=400,
+    )
+    expected_income_per_tick = get_constant(
+        state.constants,
+        "expected_income_per_tick",
+        "income_per_tick",
+        default=1,
+    )
+
+    candidates = (
+        ("normal", normal_price),
+        ("big", big_price),
+    )
+    profitable = [
+        (remaining_ticks * expected_income_per_tick - price, plow_type)
+        for plow_type, price in candidates
+        if state.money >= price + MINIMUM_CASH_RESERVE
+        and remaining_ticks * expected_income_per_tick > price
+    ]
+    if not profitable:
+        return None
+    return max(profitable)[1]
+
+
+def get_constant(constants, *names, default):
+    for name in names:
+        value = constants.get(name)
+        if isinstance(value, (int, float)):
+            return value
+    return default
 
 
 #===============HELPER FUNCTION=================
@@ -70,25 +155,35 @@ def next_to_depot(plow: Plow, map: GameMap):
 def get_possible_move(plow: Plow, map: GameMap):
     return list(get_possible_move_from_position(plow.position, map))
 
-def go_to_garage(plow: Plow, map: GameMap, plows):
+def go_to_garage(plow: Plow, map: GameMap, plows, reserved_positions=()):
     garage_position = GARAGE_POSITION[0]
-    other_plows = [other.position for other in plows if other.id != plow.id]
-    next_move = astar_next_move(plow.position, garage_position, map, other_plows)
+    other_plows = [
+        other.position
+        for other in plows
+        if other.id != plow.id and not other.broken
+    ]
+    next_move = astar_next_move(
+        plow.position,
+        garage_position,
+        map,
+        other_plows + list(reserved_positions),
+    )
     return next_move
 
-def go_to_depot(plow: Plow, map: GameMap, plows):
+def go_to_depot(plow: Plow, map: GameMap, plows, reserved_positions=()):
     """Return the next move toward the closest depot."""
     if not DEPOT_POSITION:
         return None
 
     other_plows = [
         other.position for other in plows
-        if other.id != plow.id
+        if other.id != plow.id and not other.broken
     ]
     blocked_positions = {
         Position(position.x % map.width, position.y % map.height)
         for position in other_plows
     }
+    blocked_positions.update(reserved_positions)
     target = DEPOT_TARGETS.get(plow.id)
     if (
         target is not None
@@ -229,6 +324,18 @@ def move_destination(position: Position, direction: str, map: GameMap):
         (position.x + dx) % map.width,
         (position.y + dy) % map.height,
     )
+
+
+def reserve_next_positions(
+    reserved_positions: set,
+    position: Position,
+    direction: str,
+    map: GameMap,
+):
+    first_position = move_destination(position, direction, map)
+    second_position = move_destination(first_position, direction, map)
+    reserved_positions.add(first_position)
+    reserved_positions.add(second_position)
 
 
 def are_adjacent(first: Position, second: Position, map: GameMap):
