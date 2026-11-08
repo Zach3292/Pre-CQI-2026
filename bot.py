@@ -51,23 +51,24 @@ def first_turn_action(map: GameMap):
             if map.tile(i, j) == "G":
                 GARAGE_POSITION.append((i, j))
     first_turn = False
+    # clean print the map
+    # print("Map:")
+    # for j in range(map.height):
+    #     row = ""
+    #     for i in range(map.width):
+    #         row += map.tile(i, j)
+    #     print(row)
 
 def next_to_depot(plow: Plow, map: GameMap):
     result = False
-    if map.tile(plow.position.x, plow.position.y+1) == "D": result = True
-    if map.tile(plow.position.x, plow.position.y-1) == "D": result = True
-    if map.tile(plow.position.x+1, plow.position.y) == "D": result = True
-    if map.tile(plow.position.x-1, plow.position.y) == "D": result = True
+    if map.tile(plow.position.x, plow.position.y + 1) == "D": result = True
+    if map.tile(plow.position.x, plow.position.y - 1) == "D": result = True
+    if map.tile(plow.position.x + 1, plow.position.y) == "D": result = True
+    if map.tile(plow.position.x - 1, plow.position.y) == "D": result = True
     return result
 
 def get_possible_move(plow: Plow, map: GameMap):
-    move = []
-    if map.passable(plow.position.x, plow.position.y+1): move.append("N")
-    if map.passable(plow.position.x, plow.position.y-1): move.append("S")
-    if map.passable(plow.position.x+1, plow.position.y): move.append("E")
-    if map.passable(plow.position.x-1, plow.position.y): move.append("O")
-
-    return move
+    return list(get_possible_move_from_position(plow.position, map))
 
 def go_to_garage(plow: Plow, map: GameMap, plows):
     garage_position = GARAGE_POSITION[0]
@@ -95,7 +96,9 @@ def go_to_depot(plow: Plow, map: GameMap, plows):
         and map.passable(target.x, target.y)
         and any(is_adjacent_to_depot(target, depot, map) for depot in DEPOT_POSITION)
     ):
-        next_move = astar_next_move(plow.position, target, map, other_plows)
+        next_move = astar_next_move(
+            plow.position, target, map, blocked_positions
+        )
         if next_move is not None:
             return next_move
         DEPOT_TARGETS.pop(plow.id, None)
@@ -128,7 +131,9 @@ def go_to_depot(plow: Plow, map: GameMap, plows):
         ),
     )
     for target in depot_targets:
-        next_move = astar_next_move(plow.position, target, map, other_plows)
+        next_move = astar_next_move(
+            plow.position, target, map, blocked_positions
+        )
         if next_move is not None:
             DEPOT_TARGETS[plow.id] = target
             return next_move
@@ -161,46 +166,108 @@ def astar_next_move(start: Position, target, map: GameMap, blocked_positions=())
         Position(position.x % map.width, position.y % map.height)
         for position in blocked_positions
     }
+    if target in blocked or not map.passable(target.x, target.y):
+        return None
     path = find_path(
         start,
         target,
         neighbors_fnct=lambda position: astar_neighbors(position, map, blocked),
-        heuristic_cost_estimate_fnct=lambda position, goal: (
-            abs(position.x - goal.x) + abs(position.y - goal.y)
+        heuristic_cost_estimate_fnct=lambda position, goal: toroidal_distance(
+            position, goal, map
         ),
     )
     path = list(path) if path is not None else []
     if len(path) < 2:
         return None
+    if any(
+        position in blocked or not map.passable(position.x, position.y)
+        for position in path[1:]
+    ):
+        return None
 
     next_position = path[1]
+    if not are_adjacent(start, next_position, map):
+        return None
     if next_position.x == start.x + 1:
-        return "E"
-    if next_position.x == start.x - 1:
-        return "O"
-    if next_position.y == start.y + 1:
-        return "N"
-    if next_position.y == start.y - 1:
-        return "S"
-    if start.x == 0 and next_position.x == map.width - 1:
-        return "O"
-    if start.x == map.width - 1 and next_position.x == 0:
-        return "E"
-    if start.y == 0 and next_position.y == map.height - 1:
-        return "S"
-    return "N"
+        direction = "E"
+    elif next_position.x == start.x - 1:
+        direction = "O"
+    elif next_position.y == start.y - 1:
+        direction = "N"
+    elif next_position.y == start.y + 1:
+        direction = "S"
+    elif start.x == 0 and next_position.x == map.width - 1:
+        direction = "O"
+    elif start.x == map.width - 1 and next_position.x == 0:
+        direction = "E"
+    elif start.y == 0 and next_position.y == map.height - 1:
+        direction = "N"
+    elif start.y == map.height - 1 and next_position.y == 0:
+        direction = "S"
+    else:
+        direction = "N"
+
+    destination = move_destination(start, direction, map)
+    if (
+        destination != next_position
+        or destination in blocked
+        or not map.passable(destination.x, destination.y)
+    ):
+        return None
+    return direction
+
+
+def move_destination(position: Position, direction: str, map: GameMap):
+    offsets = {
+        "N": (0, -1),
+        "S": (0, 1),
+        "E": (1, 0),
+        "O": (-1, 0),
+    }
+    dx, dy = offsets[direction]
+    return Position(
+        (position.x + dx) % map.width,
+        (position.y + dy) % map.height,
+    )
+
+
+def are_adjacent(first: Position, second: Position, map: GameMap):
+    return (
+        (second.x - first.x) % map.width in (1, map.width - 1)
+        and second.y == first.y
+    ) or (
+        (second.y - first.y) % map.height in (1, map.height - 1)
+        and second.x == first.x
+    )
+
+
+def toroidal_distance(first: Position, second: Position, map: GameMap):
+    x_distance = abs(first.x - second.x)
+    y_distance = abs(first.y - second.y)
+    return (
+        min(x_distance, map.width - x_distance)
+        + min(y_distance, map.height - y_distance)
+    )
 
 
 def astar_neighbors(position: Position, map: GameMap, blocked_positions=()):
-    for candidate in (
-        Position(position.x + 1, position.y),
-        Position(position.x - 1, position.y),
-        Position(position.x, position.y + 1),
-        Position(position.x, position.y - 1),
-    ):
-        candidate = Position(candidate.x % map.width, candidate.y % map.height)
-        if (
-            candidate not in blocked_positions
-            and map.passable(candidate.x, candidate.y)
-        ):
+    for direction in get_possible_move_from_position(position, map):
+        candidate = move_destination(position, direction, map)
+        if candidate not in blocked_positions:
             yield candidate
+
+
+def get_possible_move_from_position(
+    position: Position,
+    map: GameMap,
+):
+    directions = (
+        ("N", Position(position.x, position.y - 1)),
+        ("S", Position(position.x, position.y + 1)),
+        ("E", Position(position.x + 1, position.y)),
+        ("O", Position(position.x - 1, position.y)),
+    )
+    for direction, candidate in directions:
+        candidate = Position(candidate.x % map.width, candidate.y % map.height)
+        if map.passable(candidate.x, candidate.y):
+            yield direction
