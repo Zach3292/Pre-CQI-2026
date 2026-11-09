@@ -16,7 +16,7 @@ DEPOT_TARGETS = {}
 SNOW_PLANS = {}
 CALL_TARGETS = {}
 first_turn = True
-MIN_SNOW_UNLOAD = 20
+MIN_SNOW_UNLOAD = 10
 SNOW_CAPACITY = 20
 MAX_LOOP_STOPS = 3
 MAX_SNOW_CANDIDATES = 7
@@ -29,98 +29,6 @@ DEPOT_NEARBY_DISTANCE = 6
 DECIDE_TIME_LIMIT_SECONDS = 0.35
 last_decide_time_ms = 0.0
 def decide(state: GameState) -> Orders:
-    return decide_alternative(state)
-
-    global last_decide_time_ms
-    start_time = time.perf_counter()
-    deadline = start_time + DECIDE_TIME_LIMIT_SECONDS
-    if first_turn:
-        first_turn_action(state.map)
-    orders = Orders()
-    reserved_positions = set()
-    purchase = should_buy_plow(
-        state,
-        elapsed_seconds=time.perf_counter() - start_time,
-    )
-    if purchase is not None:
-        orders.buy = purchase
-    for plow in state.my_plows:
-        if (
-            not plow.broken
-            and plow.load >= MIN_SNOW_UNLOAD
-            and next_to_depot(plow, state.map)
-        ):
-            DEPOT_TARGETS.pop(plow.id, None)
-            SNOW_PLANS.pop(plow.id, None)
-            orders.unload(plow)
-            continue
-
-        if time.perf_counter() >= deadline:
-            if plow.broken:
-                next_move = go_to_garage(plow, state.map, state.garage)
-                if next_move is not None:
-                    orders.move(plow, next_move)
-                continue
-            possible_moves = get_possible_move(plow, state.map)
-            if possible_moves:
-                next_move = random.choice(possible_moves)
-                orders.move(plow, next_move)
-                reserve_next_positions(
-                    reserved_positions, plow.position, next_move, state.map
-                )
-            continue
-
-        if plow.broken:
-            next_move = go_to_garage(plow, state.map, state.garage)
-            if next_move is not None:
-                orders.move(plow, next_move)
-        else:
-            if plow.load >= MIN_SNOW_UNLOAD:
-                if next_to_depot(plow, state.map):
-                    DEPOT_TARGETS.pop(plow.id, None)
-                    SNOW_PLANS.pop(plow.id, None)
-                    orders.unload(plow)
-                else:
-                    next_move = go_to_depot(
-                        plow, state.map, state.plows, reserved_positions
-                    )
-                    if next_move is not None:
-                        orders.move(plow, next_move)
-                        reserve_next_positions(
-                            reserved_positions, plow.position, next_move, state.map
-                        )
-            else:
-                call_target = valuable_call_target(
-                    state, plow, reserved_positions, deadline
-                )
-                if call_target is not None:
-                    next_move = astar_next_move(
-                        plow.position,
-                        call_target.position,
-                        state.map,
-                        other_plow_positions(plow, state.plows)
-                        + list(reserved_positions),
-                    )
-                else:
-                    next_move = move_on_best_snow_loop(
-                        state, plow, reserved_positions, deadline
-                    )
-                if next_move is None:
-                    possible_moves = get_possible_move(plow, state.map)
-                    if possible_moves:
-                        next_move = random.choice(possible_moves)
-                if next_move is not None and move_destination(
-                    plow.position, next_move, state.map
-                ) not in reserved_positions:
-                    orders.move(plow, next_move)
-                    reserve_next_positions(
-                        reserved_positions, plow.position, next_move, state.map
-                    )
-    last_decide_time_ms = (time.perf_counter() - start_time) * 1000
-    return orders
-
-
-def decide_alternative(state: GameState) -> Orders:
     """Run a deliberately different baseline strategy for local simulations."""
     global last_decide_time_ms
     start_time = time.perf_counter()
@@ -147,7 +55,7 @@ def decide_alternative(state: GameState) -> Orders:
                 plow, state.map, state.plows, reserved_positions
             )
         else:
-            target = alternative_target(state, plow)
+            target = select_target(state, plow)
             target_call = get_call_by_position(state, target)
             if (
                 target_call is not None
@@ -179,13 +87,12 @@ def decide_alternative(state: GameState) -> Orders:
     return orders
 
 
-def alternative_target(state: GameState, plow: Plow):
-    """Choose a target for one of the local competitor strategies."""
+def select_target(state: GameState, plow: Plow):
+    """Choose a call target, or the nearest snow tile."""
     blocked = other_plow_positions(plow, state.plows)
     call = valuable_call_target(
         state,
         plow,
-        set(blocked),
         time.perf_counter() + DECIDE_TIME_LIMIT_SECONDS / 2,
     )
     if call is not None:
@@ -211,14 +118,6 @@ def alternative_target(state: GameState, plow: Plow):
     )
 
 
-def has_active_call(state: GameState):
-    return any(
-        call.expires_at > state.tick
-        and state.map.snow[call.position.y][call.position.x] > 0
-        for call in state.calls
-    )
-
-
 def get_call_by_position(state: GameState, position):
     if position is None:
         return None
@@ -233,7 +132,7 @@ def get_call_by_position(state: GameState, position):
     )
 
 
-def valuable_call_target(state, plow, reserved_positions, deadline):
+def valuable_call_target(state, plow, deadline):
     """Return the best reachable call worth prioritizing."""
     if time.perf_counter() >= deadline or not state.calls:
         return None
@@ -622,11 +521,6 @@ def depot_unload_targets(map: GameMap):
             if map.passable(target.x, target.y):
                 targets.add(target)
     return targets
-
-
-def shortest_path_length(start, target, map: GameMap, blocked_positions=()):
-    path = shortest_path(start, target, map, blocked_positions)
-    return None if path is None else max(0, len(path) - 1)
 
 
 def shortest_path(start, target, map: GameMap, blocked_positions=()):

@@ -18,6 +18,7 @@ services:
     build: .
     environment:
       SERVER_URL: "http://server:8080/teams/moi"
+    command: ["python", "-c", "import improved_bot, main; main.bot = improved_bot; main.main()"]
     depends_on: [server]
 
   bot-equipe2:
@@ -31,6 +32,7 @@ services:
     build: .
     environment:
       SERVER_URL: "http://server:8080/teams/equipe3"
+    command: ["python", "-c", "import vibe_code_complicated_bot, main; main.bot = vibe_code_complicated_bot; main.main()"]
     depends_on: [server]
 
   bot-equipe4:
