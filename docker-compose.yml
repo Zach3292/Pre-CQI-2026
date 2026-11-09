@@ -18,26 +18,26 @@ services:
     build: .
     environment:
       SERVER_URL: "http://server:8080/teams/moi"
-    command: ["python", "-c", "import improved_bot, main; main.bot = improved_bot; main.main()"]
+    command: ["python", "-c", "import sys, improved_bot; sys.modules['bot'] = improved_bot; import main; main.main()"]
     depends_on: [server]
 
   bot-equipe2:
     build: .
     environment:
       SERVER_URL: "http://server:8080/teams/equipe2"
-    command: ["python", "-c", "import good_opponent, main; main.bot = good_opponent; main.main()"]
+    command: ["python", "-c", "import sys, good_opponent; sys.modules['bot'] = good_opponent; import main; main.main()"]
     depends_on: [server]
 
   bot-equipe3:
     build: .
     environment:
       SERVER_URL: "http://server:8080/teams/equipe3"
-    command: ["python", "-c", "import vibe_code_complicated_bot, main; main.bot = vibe_code_complicated_bot; main.main()"]
+    command: ["python", "-c", "import sys, vibe_code_complicated_bot; sys.modules['bot'] = vibe_code_complicated_bot; import main; main.main()"]
     depends_on: [server]
 
   bot-equipe4:
     build: .
     environment:
       SERVER_URL: "http://server:8080/teams/equipe4"
-    command: ["python", "-c", "import good_opponent, main; main.bot = good_opponent; main.main()"]
+    command: ["python", "-c", "import sys, good_opponent; sys.modules['bot'] = good_opponent; import main; main.main()"]
     depends_on: [server]

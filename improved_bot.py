@@ -336,9 +336,17 @@ def occupied(plow, state):
         return set()
     return {
         other.position for other in state.plows
-        if other.id != plow.id and not other.broken
-        and (plow.type != "big" or other.type == "big" or other.team == plow.team)
+        if other.id != plow.id
+        and blocks_path(plow, other)
     }
+
+
+def blocks_path(plow, other):
+    if other.broken:
+        return False
+    if plow.type != "big":
+        return True
+    return other.type == "big" or other.team == plow.team
 
 
 def passable_dropoff(position, state):
