@@ -18,26 +18,24 @@ services:
     build: .
     environment:
       SERVER_URL: "http://server:8080/teams/moi"
-      BOT_STRATEGY: "calls"
     depends_on: [server]
 
   bot-equipe2:
     build: .
     environment:
       SERVER_URL: "http://server:8080/teams/equipe2"
-      BOT_STRATEGY: "nearest"
+    command: ["python", "-c", "import good_opponent, main; main.bot = good_opponent; main.main()"]
     depends_on: [server]
 
   bot-equipe3:
     build: .
     environment:
       SERVER_URL: "http://server:8080/teams/equipe3"
-      BOT_STRATEGY: "nearest"
     depends_on: [server]
 
   bot-equipe4:
     build: .
     environment:
       SERVER_URL: "http://server:8080/teams/equipe4"
-      BOT_STRATEGY: "random"
+    command: ["python", "-c", "import good_opponent, main; main.bot = good_opponent; main.main()"]
     depends_on: [server]

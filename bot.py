@@ -5,7 +5,6 @@ Pour l'instant, chaque déneigeuse se déplace au hasard.
 """
 
 import random
-import os
 import time
 from itertools import permutations
 from astar import find_path
@@ -13,7 +12,6 @@ from astar import find_path
 from models import GameState, Orders, GameMap, Plow, Position
 
 DEPOT_POSITION = []
-GARAGE_POSITION = []
 DEPOT_TARGETS = {}
 SNOW_PLANS = {}
 CALL_TARGETS = {}
@@ -24,17 +22,14 @@ MAX_LOOP_STOPS = 3
 MAX_SNOW_CANDIDATES = 7
 GAME_LENGTH = 1500
 MINIMUM_CASH_RESERVE = 10
-MIN_SMALL_PLOWS_FOR_BIG = 5
+MIN_SMALL_PLOWS_FOR_BIG = 6
 CALL_MIN_PROFIT_MARGIN = 0
 CALL_REWARD_WEIGHT = 2
 DEPOT_NEARBY_DISTANCE = 6
 DECIDE_TIME_LIMIT_SECONDS = 0.35
 last_decide_time_ms = 0.0
-BOT_STRATEGY = os.environ.get("BOT_STRATEGY", "optimized")
-
 def decide(state: GameState) -> Orders:
-    if BOT_STRATEGY != "optimized":
-        return decide_alternative(state)
+    return decide_alternative(state)
 
     global last_decide_time_ms
     start_time = time.perf_counter()
@@ -62,7 +57,7 @@ def decide(state: GameState) -> Orders:
 
         if time.perf_counter() >= deadline:
             if plow.broken:
-                next_move = go_to_garage(plow, state.map)
+                next_move = go_to_garage(plow, state.map, state.garage)
                 if next_move is not None:
                     orders.move(plow, next_move)
                 continue
@@ -76,7 +71,7 @@ def decide(state: GameState) -> Orders:
             continue
 
         if plow.broken:
-            next_move = go_to_garage(plow, state.map)
+            next_move = go_to_garage(plow, state.map, state.garage)
             if next_move is not None:
                 orders.move(plow, next_move)
         else:
@@ -142,7 +137,7 @@ def decide_alternative(state: GameState) -> Orders:
         orders.buy = purchase
     for plow in state.my_plows:
         if plow.broken:
-            next_move = go_to_garage(plow, state.map)
+            next_move = go_to_garage(plow, state.map, state.garage)
         elif plow.load >= MIN_SNOW_UNLOAD and next_to_depot(plow, state.map):
             SNOW_PLANS.pop(plow.id, None)
             orders.unload(plow)
@@ -153,13 +148,24 @@ def decide_alternative(state: GameState) -> Orders:
             )
         else:
             target = alternative_target(state, plow)
-            next_move = astar_next_move(
-                plow.position,
-                target,
-                state.map,
-                other_plow_positions(plow, state.plows)
-                + list(reserved_positions),
-            ) if target is not None else None
+            target_call = get_call_by_position(state, target)
+            if (
+                target_call is not None
+                and plow.load + state.map.snow[
+                    target_call.position.y
+                ][target_call.position.x] > SNOW_CAPACITY
+            ):
+                next_move = go_to_depot(
+                    plow, state.map, state.plows, reserved_positions
+                )
+            else:
+                next_move = astar_next_move(
+                    plow.position,
+                    target,
+                    state.map,
+                    other_plow_positions(plow, state.plows)
+                    + list(reserved_positions),
+                ) if target is not None else None
 
         if next_move is not None:
             destination = move_destination(plow.position, next_move, state.map)
@@ -176,15 +182,14 @@ def decide_alternative(state: GameState) -> Orders:
 def alternative_target(state: GameState, plow: Plow):
     """Choose a target for one of the local competitor strategies."""
     blocked = other_plow_positions(plow, state.plows)
-    if BOT_STRATEGY == "calls":
-        call = valuable_call_target(
-            state,
-            plow,
-            set(blocked),
-            time.perf_counter() + DECIDE_TIME_LIMIT_SECONDS / 2,
-        )
-        if call is not None:
-            return call.position
+    call = valuable_call_target(
+        state,
+        plow,
+        set(blocked),
+        time.perf_counter() + DECIDE_TIME_LIMIT_SECONDS / 2,
+    )
+    if call is not None:
+        return call.position
 
     snow_targets = [
         Position(x, y)
@@ -197,14 +202,34 @@ def alternative_target(state: GameState, plow: Plow):
     if not snow_targets:
         return None
 
-    if BOT_STRATEGY == "random":
-        return random.choice(snow_targets)
     return min(
         snow_targets,
         key=lambda target: (
             toroidal_distance(plow.position, target, state.map),
             -state.map.snow[target.y][target.x],
         ),
+    )
+
+
+def has_active_call(state: GameState):
+    return any(
+        call.expires_at > state.tick
+        and state.map.snow[call.position.y][call.position.x] > 0
+        for call in state.calls
+    )
+
+
+def get_call_by_position(state: GameState, position):
+    if position is None:
+        return None
+    return next(
+        (
+            call for call in state.calls
+            if call.position == position
+            and call.expires_at > state.tick
+            and state.map.snow[call.position.y][call.position.x] > 0
+        ),
+        None,
     )
 
 
@@ -232,21 +257,12 @@ def valuable_call_target(state, plow, reserved_positions, deadline):
     candidates = []
     for call in active_calls.values():
         distance = toroidal_distance(plow.position, call.position, state.map)
-        remaining_time = call.expires_at - state.tick
-        snow_amount = state.map.snow[call.position.y][call.position.x]
-        enough_capacity = plow.load + snow_amount <= SNOW_CAPACITY
-        if (
-            enough_capacity
-            and remaining_time > distance
-            and call.reward * CALL_REWARD_WEIGHT
-            >= distance * 2 + CALL_MIN_PROFIT_MARGIN
-        ):
-            candidates.append((
-                call.reward * CALL_REWARD_WEIGHT - distance * 2,
-                call.reward,
-                -distance,
-                call,
-            ))
+        candidates.append((
+            call.reward * CALL_REWARD_WEIGHT - distance * 2,
+            call.reward,
+            -distance,
+            call,
+        ))
 
     if not candidates:
         CALL_TARGETS.pop(plow.id, None)
@@ -294,7 +310,7 @@ def should_buy_plow(state: GameState, elapsed_seconds=0.0):
         state.constants,
         "expected_income_per_tick",
         "income_per_tick",
-        default=0.85,
+        default=0.8,
     )
 
     small_plow_count = sum(
@@ -333,8 +349,6 @@ def first_turn_action(map: GameMap):
         for j in range(map.height):
             if map.tile(i, j) == "D":
                 DEPOT_POSITION.append((i, j))
-            if map.tile(i, j) == "G":
-                GARAGE_POSITION.append((i, j))
     global first_turn
     first_turn = False
 
@@ -350,8 +364,7 @@ def next_to_depot(plow: Plow, map: GameMap):
 def get_possible_move(plow: Plow, map: GameMap):
     return list(get_possible_move_from_position(plow.position, map))
 
-def go_to_garage(plow: Plow, map: GameMap):
-    garage_position = GARAGE_POSITION[0]
+def go_to_garage(plow: Plow, map: GameMap, garage_position: Position):
     next_move = astar_next_move(
         plow.position,
         garage_position,
